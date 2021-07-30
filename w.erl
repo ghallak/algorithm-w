@@ -7,7 +7,8 @@
 -export([ ftv/1
         , apply_subst/2
         , generalize/2
-        , instantiate/1 ]).
+        , instantiate/1
+        , type_infer/2 ]).
 
 -type evar() :: {evar, string()}.
 -type elit() :: {elit, lit()}.
@@ -35,6 +36,10 @@
 
 -type types() :: type() | type_scheme() | type_env() | list(types()).
 
+-spec type_env_remove(type_env(), string()) -> type_env().
+type_env_remove({type_env, Env}, X) ->
+    {type_env, maps:remove(X, Env)}.
+
 -spec ftv(types()) -> sets:set(string).
 % -spec ftv(type()) -> sets:set(string).
 ftv({tvar, N}) ->
@@ -59,6 +64,10 @@ ftv([Type | Types]) ->
 
 % A substitution is a mapping of type variables to types. [1]
 -type subst() :: maps:map(string, type()).
+
+-spec compose_subst(subst(), subst()) -> subst().
+compose_subst(S1, S2) ->
+    maps:merge(maps:map(fun(T) -> apply_subst(S1, T) end, S2), S2).
 
 % TODO: The return type is the same type as the second arg.
 -spec apply_subst(subst(), types()) -> type().
@@ -109,6 +118,66 @@ generalize(TypeEnv, Type) ->
 -spec instantiate(type_scheme()) -> type_scheme().
 instantiate({type_scheme, Vars, Type}) ->
     % Fresh type variables are type variables with new names.
-    FreshVars = lists:map(fun(N) -> "a" ++ integer_to_list(N) end, lists:seq(1, length(Vars))),
+    FreshVars = lists:map(fun(_) -> "a" ++ integer_to_list(erlang:monotonic_time()) end, lists:seq(1, length(Vars))),
 
     {type_scheme, FreshVars, Type}.
+
+% For two types t1 and t2 , mgu(t1,t2) returns the most general unifier, which
+% is a substitution. By definition, it holds for a unifier S that
+% S(t1) = S(t2). [1]
+-spec mgu(type(), type()) -> subst().
+mgu({tfun, T1, U1}, {tfun, T2, U2}) ->
+    S1 = mgu(T1, T2),
+    S2 = mgu(apply_subst(S1, U1), apply_subst(S1, U2)),
+    compose_subst(S1, S2);
+mgu({tint}, {tint}) ->
+    maps:new();
+mgu({tbool}, {tbool}) ->
+    maps:new();
+mgu({tvar, _}, {tvar, _}) ->
+    maps:new();
+mgu(T, {tvar, N}) ->
+    mgu({tvar, N}, T);
+mgu({tvar, N}, T) ->
+    case sets:is_element(N, ftv(T)) of
+        true ->
+            % Can't substitute N with T if N appears in T.
+            erlang:error("Occurs check");
+        false ->
+            maps:from_list([{N, T}])
+    end;
+mgu(_, _) ->
+    erlang:error("Can't unify types").
+
+-spec type_infer(type_env(), exp()) -> {subst(), type()}.
+type_infer({type_env, Env}, {evar, N}) ->
+    case maps:find(N, Env) of
+        {ok, Sigma} ->
+            {maps:new(), instantiate(Sigma)};
+        error ->
+            erlang:error("unbound variable")
+    end;
+type_infer({type_env, _}, {elit, L}) ->
+    case L of
+        {lint, _} ->
+            {maps:new(), {tint}};
+        {lbool, _} ->
+            {maps:new(), {tbool}}
+    end;
+type_infer(TypeEnv, {eabs, X, E}) ->
+    FreshVar = "a" ++ integer_to_list(erlang:monotonic_time()),
+    {type_env, Env} = type_env_remove(TypeEnv, X),
+    {S1, T1} = type_infer(maps:merge(Env, maps:from_list([{X, FreshVar}])), E),
+    {S1, {tfun, apply_subst(S1, FreshVar), T1}};
+type_infer(TypeEnv, {eapp, E1, E2}) ->
+    FreshVar = "a" ++ integer_to_list(erlang:monotonic_time()),
+    {S1, T1} = type_infer(TypeEnv, E1),
+    {S2, T2} = type_infer(apply_subst(S1, TypeEnv), E2),
+    S3 = mgu(apply_subst(S2, T1), {tfun, T2, FreshVar}),
+    {compose_subst(compose_subst(S1, S2), S3), apply_subst(S3, FreshVar)};
+type_infer(TypeEnv, {elet, X, E1, E2}) ->
+    {S1, T1} = type_infer(TypeEnv, E1),
+    {type_env, Env1} = apply_subst(S1, type_env_remove(TypeEnv, X)),
+    Env2 = maps:from_list([{X, generalize(apply_subst(S1, TypeEnv), T1)}]),
+    {S2, T2} = type_infer(maps:merge(Env1, Env2), E2),
+    {compose_subst(S1, S2), T2}.
