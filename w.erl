@@ -1,7 +1,13 @@
+% [1] Bastiaan Heeren, Jurriaan Hage, and Doaitse Swierstra. Generalizing
+%     Hindley-Milner type inference algorithms. Technical Report UU-CS-2002-031,
+%     Institute of Information and Computing Sciences, Utrecht University, 2002.
+
 -module(w).
 
 -export([ ftv/1
-        , apply_subst/2 ]).
+        , apply_subst/2
+        , generalize/2
+        , instantiate/1 ]).
 
 -type evar() :: {evar, string()}.
 -type elit() :: {elit, lit()}.
@@ -89,3 +95,20 @@ apply_subst(_Subst, []) ->
     [];
 apply_subst(Subst, [Type | Types]) ->
     [apply_subst(Subst, Type)|apply_subst(Subst, Types)].
+
+% Generalizing a type t with respect to a type environment env entails the
+% quantification of the type variables that are free in t but do not occur
+% in env. [1]
+-spec generalize(type_env(), type()) -> type_scheme().
+generalize(TypeEnv, Type) ->
+    Quantified = sets:subtract(ftv(Type), ftv(TypeEnv)),
+    {type_scheme, sets:to_list(Quantified), Type}.
+
+% An instantiation of a type scheme is obtained by the replacement of the
+% quantified type variables by fresh type variables. [1]
+-spec instantiate(type_scheme()) -> type_scheme().
+instantiate({type_scheme, Vars, Type}) ->
+    % Fresh type variables are type variables with new names.
+    FreshVars = lists:map(fun(N) -> "a" ++ integer_to_list(N) end, lists:seq(1, length(Vars))),
+
+    {type_scheme, FreshVars, Type}.
