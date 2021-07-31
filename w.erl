@@ -43,22 +43,22 @@ type_env_remove({type_env, Env}, X) ->
 -spec ftv(types()) -> sets:set(string).
 % -spec ftv(type()) -> sets:set(string).
 ftv({tvar, N}) ->
-    sets:from_list([N], {version, 2});
+    sets:from_list([N]);
 ftv({tint}) ->
-    sets:new({version, 2});
+    sets:new();
 ftv({tbool}) ->
-    sets:new({version, 2});
+    sets:new();
 ftv({tfun, T1, T2}) ->
     sets:union(ftv(T1), ftv(T2));
 % -spec ftv(type_scheme()) -> sets:set(string).
 ftv({type_scheme, Vars, Type}) ->
     sets:subtract(ftv(Type), sets:from_list(Vars));
 % -spec ftv(type_env) -> sets:set(string).
-ftv({type_env, env}) ->
-    ftv(maps:values(env));
+ftv({type_env, Env}) ->
+    ftv(maps:values(Env));
 % -spec ftv(list(types())) -> sets:set(string).
 ftv([]) ->
-    sets:new({version, 2});
+    sets:new();
 ftv([Type | Types]) ->
     sets:union(ftv(Type), ftv(Types)).
 
@@ -67,7 +67,7 @@ ftv([Type | Types]) ->
 
 -spec compose_subst(subst(), subst()) -> subst().
 compose_subst(S1, S2) ->
-    maps:merge(maps:map(fun(T) -> apply_subst(S1, T) end, S2), S2).
+    maps:merge(maps:map(fun(_, T) -> apply_subst(S1, T) end, S2), S2).
 
 % TODO: The return type is the same type as the second arg.
 -spec apply_subst(subst(), types()) -> type().
@@ -79,7 +79,7 @@ apply_subst(Subst, {tvar, N}) ->
         {ok, T} ->
             T;
         error ->
-            N
+            {tvar, N}
     end;
 apply_subst(_Subst, {tint}) ->
     {tint};
@@ -93,12 +93,12 @@ apply_subst(Subst, {type_scheme, Vars, Type}) ->
     % variables in a type scheme are not affected by a substitution. [1]
 
     % Keep only free type variables in the substitution.
-    SubstWithoutBound = maps:without(Subst, Vars),
+    SubstWithoutBound = maps:without(Vars, Subst),
     {type_scheme, Vars, apply_subst(SubstWithoutBound, Type)};
 % -spec apply_subst(subst(), type_env()) -> type_env().
-apply_subst(Subst, {type_env, env}) ->
+apply_subst(Subst, {type_env, Env}) ->
     % Apply the substitution to the type schemes of the environment.
-    {type_env, maps:map(fun (TypeScheme) -> apply_subst(Subst, TypeScheme) end, env)};
+    {type_env, maps:map(fun(_, TypeScheme) -> apply_subst(Subst, TypeScheme) end, Env)};
 % -spec apply_subst(subst(), list(types)) -> list(types).
 apply_subst(_Subst, []) ->
     [];
@@ -118,9 +118,11 @@ generalize(TypeEnv, Type) ->
 -spec instantiate(type_scheme()) -> type_scheme().
 instantiate({type_scheme, Vars, Type}) ->
     % Fresh type variables are type variables with new names.
-    FreshVars = lists:map(fun(_) -> "a" ++ integer_to_list(erlang:monotonic_time()) end, lists:seq(1, length(Vars))),
+    FreshTVars = lists:map(fun(_) -> {tvar, "a" ++ integer_to_list(erlang:monotonic_time())} end, lists:seq(1, length(Vars))),
 
-    {type_scheme, FreshVars, Type}.
+    Subst = maps:from_list(lists:zip(Vars, FreshTVars)),
+
+    apply_subst(Subst, Type).
 
 % For two types t1 and t2 , mgu(t1,t2) returns the most general unifier, which
 % is a substitution. By definition, it holds for a unifier S that
@@ -165,19 +167,20 @@ type_infer({type_env, _}, {elit, L}) ->
             {maps:new(), {tbool}}
     end;
 type_infer(TypeEnv, {eabs, X, E}) ->
-    FreshVar = "a" ++ integer_to_list(erlang:monotonic_time()),
+    FreshTVar = {tvar, "a" ++ integer_to_list(erlang:monotonic_time())},
+    FreshScheme = {type_scheme, [], FreshTVar},
     {type_env, Env} = type_env_remove(TypeEnv, X),
-    {S1, T1} = type_infer(maps:merge(Env, maps:from_list([{X, FreshVar}])), E),
-    {S1, {tfun, apply_subst(S1, FreshVar), T1}};
+    {S1, T1} = type_infer({type_env, maps:merge(Env, maps:from_list([{X, FreshScheme}]))}, E),
+    {S1, {tfun, apply_subst(S1, FreshTVar), T1}};
 type_infer(TypeEnv, {eapp, E1, E2}) ->
-    FreshVar = "a" ++ integer_to_list(erlang:monotonic_time()),
+    FreshTVar = {tvar, "a" ++ integer_to_list(erlang:monotonic_time())},
     {S1, T1} = type_infer(TypeEnv, E1),
     {S2, T2} = type_infer(apply_subst(S1, TypeEnv), E2),
-    S3 = mgu(apply_subst(S2, T1), {tfun, T2, FreshVar}),
-    {compose_subst(compose_subst(S1, S2), S3), apply_subst(S3, FreshVar)};
+    S3 = mgu(apply_subst(S2, T1), {tfun, T2, FreshTVar}),
+    {compose_subst(compose_subst(S1, S2), S3), apply_subst(S3, FreshTVar)};
 type_infer(TypeEnv, {elet, X, E1, E2}) ->
     {S1, T1} = type_infer(TypeEnv, E1),
     {type_env, Env1} = apply_subst(S1, type_env_remove(TypeEnv, X)),
     Env2 = maps:from_list([{X, generalize(apply_subst(S1, TypeEnv), T1)}]),
-    {S2, T2} = type_infer(maps:merge(Env1, Env2), E2),
+    {S2, T2} = type_infer({type_env, maps:merge(Env1, Env2)}, E2),
     {compose_subst(S1, S2), T2}.
