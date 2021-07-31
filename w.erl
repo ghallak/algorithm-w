@@ -4,11 +4,7 @@
 
 -module(w).
 
--export([ ftv/1
-        , apply_subst/2
-        , generalize/2
-        , instantiate/1
-        , type_infer/2 ]).
+-export([type_infer/2]).
 
 -type evar() :: {evar, string()}.
 -type elit() :: {elit, lit()}.
